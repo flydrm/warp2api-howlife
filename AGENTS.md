@@ -34,12 +34,13 @@
   - UI: `account.html`（本地浏览器页面）
   - Proxy: `proxy_server.py`（Flask，端口默认 8021）解决 CORS，并提供导入到 SQLite 的简易 API
 
-## 2) 端口与进程
+## 2) 端口与进程（已统一到 8080）
 
-- 8000: Protobuf 桥接 (`warp2api-main/server.py` → mounts `warp2protobuf/api/protobuf_routes.py`)
-- 8010: OpenAI 兼容 (`warp2api-main/openai_compat.py` → `protobuf2openai.app`)
-- 8019: 账号池服务 (`account-pool-service/main.py`)
-- 8021: 账号管理器 UI 代理 (`proxy_server.py` → `account.html`)
+- 8080（统一网关 `unified_server.py`）
+  - `/v1/**` → OpenAI 兼容层（原 8010）
+  - `/bridge/**` → Protobuf 桥接（原 8000）
+  - `/pool/**` → 账号池服务（原 8019）
+  - `/account.html` 与 `/manager/account.html` → 账号管理器 UI；根路径 API 保留
 
 ## 3) 核心数据契约（简化）
 

@@ -89,15 +89,24 @@ except Exception as e:
 # the PoolManager lifecycle via our own startup/shutdown hooks.
 _pool_manager = None
 try:
-    from account_pool_service.account_pool.pool_manager import get_pool_manager
+    # account-pool-service/account_pool/pool_manager.py
+    from account_pool.pool_manager import get_pool_manager
     _pool_manager = get_pool_manager()
 except Exception as e:
     # Defer failure to startup; we still mount the router app for HTTP
     _pool_manager = None
 
 try:
-    from account_pool_service.main import app as pool_app
-    app.mount("/pool", pool_app)
+    # Dynamically import account-pool-service/main.py as a module to get its FastAPI app
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("pool_main", str(POOL_DIR / "main.py"))
+    if _spec and _spec.loader:
+        pool_main = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(pool_main)  # type: ignore
+        pool_app = getattr(pool_main, "app")
+        app.mount("/pool", pool_app)
+    else:
+        raise RuntimeError("Cannot load pool main module")
 except Exception as e:
     raise RuntimeError(f"Failed to mount pool app: {e}")
 
@@ -217,7 +226,7 @@ async def _on_startup():
         # Ensure account pool manager is running when unified server starts
         global _pool_manager
         if _pool_manager is None:
-            from account_pool_service.account_pool.pool_manager import get_pool_manager
+            from account_pool.pool_manager import get_pool_manager
             _pool_manager = get_pool_manager()
         await _pool_manager.start()
     except Exception:
