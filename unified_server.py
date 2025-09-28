@@ -1,6 +1,255 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Unified ASGI server (single port 8080)
+
+Mounts:
+- /v1/** -> OpenAI-compatible app (from protobuf2openai)
+- /bridge/** -> Protobuf bridge (from warp2protobuf)
+- /pool/** -> Account pool service APIs
+
+Also exposes at ROOT for Account Manager UI compatibility:
+- GET  /account.html
+- POST /proxy/warp-token
+- POST /api/test-database
+- POST /api/import-account
+
+And serves the UI also at /manager/account.html for clarity.
+"""
+
+import os
+import sqlite3
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+
+# ---------------------------------------------------------------------
+# Set default environment variables BEFORE importing sub-apps
+# ---------------------------------------------------------------------
+os.environ.setdefault("HOST", "0.0.0.0")
+os.environ.setdefault("PORT", "8080")
+
+# Point pool/bridge to the unified server prefixes
+os.environ.setdefault("POOL_SERVICE_URL", "http://localhost:8080/pool")
+os.environ.setdefault("USE_POOL_SERVICE", "true")
+os.environ.setdefault("BRIDGE_BASE_URL", "http://localhost:8080/bridge")
+
+
+# Ensure we can import sub-packages
+ROOT = Path(__file__).resolve().parent
+WARP_DIR = ROOT / "warp2api-main"
+POOL_DIR = ROOT / "account-pool-service"
+import sys
+if str(WARP_DIR) not in sys.path:
+    sys.path.append(str(WARP_DIR))
+if str(POOL_DIR) not in sys.path:
+    sys.path.append(str(POOL_DIR))
+
+
+# ---------------------------------------------------------------------
+# Create unified app
+# ---------------------------------------------------------------------
+app = FastAPI(title="Warp2API Unified Server", version="1.0.0")
+
+# CORS: if deploying behind same domain, this can be narrowed down later
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------
+# Mount sub-apps
+# ---------------------------------------------------------------------
+try:
+    # Protobuf bridge app (no lifespan needed)
+    from warp2protobuf.api.protobuf_routes import app as bridge_app
+    app.mount("/bridge", bridge_app)
+except Exception as e:
+    raise RuntimeError(f"Failed to mount bridge app: {e}")
+
+
+try:
+    # OpenAI-compatible app; mounts its own routes under /v1/**
+    from protobuf2openai.app import app as openai_app
+    app.mount("/", openai_app)
+except Exception as e:
+    raise RuntimeError(f"Failed to mount OpenAI-compatible app: {e}")
+
+
+# Account pool: we prefer to mount the FastAPI app, and separately ensure
+# the PoolManager lifecycle via our own startup/shutdown hooks.
+_pool_manager = None
+try:
+    from account_pool_service.account_pool.pool_manager import get_pool_manager
+    _pool_manager = get_pool_manager()
+except Exception as e:
+    # Defer failure to startup; we still mount the router app for HTTP
+    _pool_manager = None
+
+try:
+    from account_pool_service.main import app as pool_app
+    app.mount("/pool", pool_app)
+except Exception as e:
+    raise RuntimeError(f"Failed to mount pool app: {e}")
+
+
+# ---------------------------------------------------------------------
+# Root-level endpoints for Account Manager UI compatibility
+# ---------------------------------------------------------------------
+import httpx
+
+
+@app.post("/proxy/warp-token")
+async def proxy_warp_token(grant_type: str = Form(...), refresh_token: str = Form(...)):
+    """Proxy for Warp secure token endpoint (root path)."""
+    url = os.getenv(
+        "WARP_REFRESH_URL",
+        "https://app.warp.dev/proxy/token?key=AIzaSyBdy3O3S9hrdayLJxJ7mriBR4qgUaUygAs",
+    )
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = f"grant_type={grant_type}&refresh_token={refresh_token}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            r = await client.post(url, headers=headers, content=data)
+            content_type = r.headers.get("content-type", "")
+            if content_type.startswith("application/json"):
+                return JSONResponse(status_code=r.status_code, content=r.json())
+            return JSONResponse(status_code=r.status_code, content={"text": r.text})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/test-database")
+async def test_database(payload: dict):
+    """Root-level DB connectivity check for Account Manager UI."""
+    db_path: Optional[str] = payload.get("db_path")
+    if not db_path:
+        return {"success": False, "error": "数据库路径不能为空"}
+    if not os.path.exists(db_path):
+        return {"success": False, "error": f"数据库文件不存在: {db_path}"}
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='accounts'")
+        if not cur.fetchone():
+            conn.close()
+            return {"success": False, "error": "accounts表不存在"}
+        cur.execute("PRAGMA table_info(accounts)")
+        cols = ", ".join([c[1] for c in cur.fetchall()])
+        conn.close()
+        return {"success": True, "table_info": f"包含字段: {cols}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/import-account")
+async def import_account(payload: dict):
+    """Root-level DB import for Account Manager UI."""
+    db_path = payload.get("db_path")
+    account = payload.get("account")
+    if not db_path or not account:
+        return {"success": False, "error": "缺少必要参数"}
+    if not os.path.exists(db_path):
+        return {"success": False, "error": f"数据库文件不存在: {db_path}"}
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT email FROM accounts WHERE email = ?", (account["email"],))
+        if cur.fetchone():
+            conn.close()
+            return {"success": False, "error": "邮箱已存在"}
+        cur.execute(
+            """
+            INSERT INTO accounts (email, local_id, id_token, refresh_token, status, created_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            """,
+            (
+                account["email"],
+                account["local_id"],
+                account["id_token"],
+                account["refresh_token"],
+                account.get("status", "available"),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return {"success": True, "message": "账号导入成功"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------
+# Static serving for Account Manager UI
+# ---------------------------------------------------------------------
+
+@app.get("/account.html")
+async def serve_account_html_root():
+    f = ROOT / "account.html"
+    if not f.exists():
+        raise HTTPException(status_code=404, detail="account.html 不存在")
+    return FileResponse(str(f))
+
+
+# Also expose under /manager/account.html for clarity
+app.mount("/manager", StaticFiles(directory=str(ROOT), html=True), name="manager")
+
+
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------
+# Startup/Shutdown: ensure pool manager lifecycle (defensive)
+# ---------------------------------------------------------------------
+@app.on_event("startup")
+async def _on_startup():
+    try:
+        # Ensure account pool manager is running when unified server starts
+        global _pool_manager
+        if _pool_manager is None:
+            from account_pool_service.account_pool.pool_manager import get_pool_manager
+            _pool_manager = get_pool_manager()
+        await _pool_manager.start()
+    except Exception:
+        # Do not fail unified server; pool endpoints will return 503 if not running
+        pass
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    try:
+        if _pool_manager:
+            await _pool_manager.stop()
+    except Exception:
+        pass
+
+
+def main():
+    import uvicorn
+    uvicorn.run(
+        "unified_server:app",
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8080")),
+        log_level="info",
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
 Unified ASGI server (single port 8080) that mounts:
 - OpenAI-compatible API (at /v1/**)
 - Protobuf bridge (under /bridge/**)
