@@ -1,3 +1,24 @@
+## 统一端口与接口总览（8080）
+
+统一网关地址：`http://localhost:8080`
+
+- OpenAI 兼容 API（路径保持不变）：`/v1/**`
+- Protobuf 桥接：`/bridge/**`
+- 账号池服务：`/pool/**`
+- 账号管理器 UI：`/manager/account.html`（根路径也提供 `/account.html`）
+- 账号管理器 API（根路径保留）：`/proxy/warp-token`、`/api/test-database`、`/api/import-account`
+
+统一健康检查：
+```bash
+curl http://localhost:8080/healthz
+curl http://localhost:8080/bridge/healthz
+curl http://localhost:8080/pool/health
+```
+
+---
+
+## 账号管理器 API（根路径保留）
+
 ### 获取账号信息接口
 ``` curl --location --request POST 'https://app.warp.dev/proxy/token?key=AIzaSyBdy3O3S9hrdayLJxJ7mriBR4qgUaUygAs' \
 --header 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36' \
@@ -60,6 +81,111 @@ echo "email,local_id,id_token,refresh_token,status" > accounts.csv
 echo "user1@example.com,firebase_uid_12345,your_id_token_1,your_refresh_token_1,available" >> accounts.csv  
 echo "user2@example.com,firebase_uid_67890,your_id_token_2,your_refresh_token_2,available" >> accounts.csv
 echo "user3@example.com,firebase_uid_11111,your_id_token_3,your_refresh_token_3,available" >> accounts.csv
+```
+
+---
+
+## Protobuf 桥接（/bridge/**）
+
+- 健康检查：
+```bash
+curl http://localhost:8080/bridge/healthz
+```
+
+- JSON → Protobuf：
+```bash
+curl -sS -X POST http://localhost:8080/bridge/api/encode \
+  -H 'Content-Type: application/json' \
+  -d '{"message_type":"warp.multi_agent.v1.Request","json_data":{"version":7}}' | jq
+```
+
+- Protobuf → JSON：
+```bash
+curl -sS -X POST http://localhost:8080/bridge/api/decode \
+  -H 'Content-Type: application/json' \
+  -d '{"message_type":"warp.multi_agent.v1.Request","protobuf_bytes":"...base64..."}' | jq
+```
+
+- Warp 直连（解析/流式）：`/bridge/api/warp/send`、`/bridge/api/warp/send_stream`、`/bridge/api/warp/send_stream_sse`
+
+---
+
+## OpenAI 兼容 API（/v1/**）
+
+```bash
+curl -sS -X POST http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer test-key' \
+  -d '{
+    "model":"claude-3-5-sonnet-20241022",
+    "messages":[{"role":"user","content":"Hello!"}],
+    "stream":false
+  }' | jq
+```
+
+---
+
+## 账号池服务（/pool/**）
+
+注意：需要可用的邮箱注册能力或预置账号；默认使用 MoeMail 服务：
+- 从环境读取：`MOEMAIL_BASE_URL`、`MOEMAIL_API_KEY`
+- 若未配置，将无法自动补号，但接口仍可用；`/pool/health` 可用，`/pool/api/accounts/status` 在未启动/未初始化时返回服务不可用
+
+- 健康检查：
+```bash
+curl http://localhost:8080/pool/health
+```
+
+- 分配账号：
+```bash
+curl -sS -X POST http://localhost:8080/pool/api/accounts/allocate \
+  -H 'Content-Type: application/json' \
+  -d '{"count":1}' | jq
+```
+
+- 释放账号：
+```bash
+curl -sS -X POST http://localhost:8080/pool/api/accounts/release \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"your_session_id"}' | jq
+```
+
+- 状态：
+```bash
+curl -sS http://localhost:8080/pool/api/accounts/status | jq
+```
+
+- 手动补充：
+```bash
+curl -sS -X POST http://localhost:8080/pool/api/accounts/replenish \
+  -H 'Content-Type: application/json' \
+  -d '{"count": 5}' | jq
+```
+
+- 刷新 Token：
+```bash
+curl -sS -X POST http://localhost:8080/pool/api/accounts/refresh-tokens \
+  -H 'Content-Type: application/json' \
+  -d '{"force": false}' | jq
+```
+
+---
+
+## 环境变量（关键）
+
+```bash
+export PORT=8080
+export POOL_SERVICE_URL="http://localhost:8080/pool"
+export BRIDGE_BASE_URL="http://localhost:8080/bridge"
+export USE_POOL_SERVICE="true"
+
+# MoeMail（默认已内置，建议配置真实值）
+export MOEMAIL_BASE_URL="https://email.959585.xyz"
+export MOEMAIL_API_KEY="your_moemail_api_key"
+
+# 账号池阈值
+export MIN_POOL_SIZE=5
+export MAX_POOL_SIZE=50
 ```
 
 ### 需求

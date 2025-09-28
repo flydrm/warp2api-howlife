@@ -77,12 +77,13 @@ except Exception as e:
     raise RuntimeError(f"Failed to mount bridge app: {e}")
 
 
+_openai_app = None
 try:
-    # OpenAI-compatible app; mounts its own routes under /v1/**
+    # OpenAI-compatible app; defines /v1/** routes.
     from protobuf2openai.app import app as openai_app
-    app.mount("/", openai_app)
+    _openai_app = openai_app
 except Exception as e:
-    raise RuntimeError(f"Failed to mount OpenAI-compatible app: {e}")
+    raise RuntimeError(f"Failed to load OpenAI-compatible app: {e}")
 
 
 # Account pool: we prefer to mount the FastAPI app, and separately ensure
@@ -96,6 +97,7 @@ except Exception as e:
     # Defer failure to startup; we still mount the router app for HTTP
     _pool_manager = None
 
+_pool_main_module = None
 try:
     # Dynamically import account-pool-service/main.py as a module to get its FastAPI app
     import importlib.util as _ilu
@@ -103,6 +105,7 @@ try:
     if _spec and _spec.loader:
         pool_main = _ilu.module_from_spec(_spec)
         _spec.loader.exec_module(pool_main)  # type: ignore
+        _pool_main_module = pool_main
         pool_app = getattr(pool_main, "app")
         app.mount("/pool", pool_app)
     else:
@@ -229,6 +232,13 @@ async def _on_startup():
             from account_pool.pool_manager import get_pool_manager
             _pool_manager = get_pool_manager()
         await _pool_manager.start()
+        # Bridge the started manager into mounted pool app module so its routes see it
+        global _pool_main_module
+        if _pool_main_module is not None:
+            try:
+                setattr(_pool_main_module, "pool_manager", _pool_manager)
+            except Exception:
+                pass
     except Exception:
         # Do not fail unified server; pool endpoints will return 503 if not running
         pass
@@ -241,6 +251,12 @@ async def _on_shutdown():
             await _pool_manager.stop()
     except Exception:
         pass
+
+
+# Mount OpenAI-compatible app at the root AFTER registering root-level endpoints,
+# so that specific routes like /healthz or /proxy/* are matched first.
+if _openai_app is not None:
+    app.mount("/", _openai_app)
 
 
 def main():
