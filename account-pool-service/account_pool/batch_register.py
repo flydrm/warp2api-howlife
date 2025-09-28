@@ -42,13 +42,13 @@ class BatchRegister:
         self.max_workers = max_workers
         self.db = get_database()
         
-        # 加载配置
+        # 加载配置（支持环境变量覆盖 MoeMail）
         self.config = load_config()
         if not self.config:
             print("❌ 无法加载配置，使用默认配置")
             self.config = {
-                'moemail_url': 'https://api.emailnb.com',
-                'moemail_api_key': 'your_api_key',
+                'moemail_url': os.getenv('MOEMAIL_BASE_URL', 'https://api.emailnb.com'),
+                'moemail_api_key': os.getenv('MOEMAIL_API_KEY', 'your_api_key'),
                 'firebase_api_keys': ['AIzaSyBdy3O3S9hrdayLJxJ7mriBR4qgUaUygAs'],
                 'email_expiry_hours': 1
             }
