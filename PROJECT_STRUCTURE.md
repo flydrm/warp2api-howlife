@@ -18,9 +18,9 @@ warp2api/
 │       ├── logger.py            # 日志工具
 │       └── helpers.py           # 辅助函数
 │
-├── z-warp2api/                   # Warp2API主服务
-│   ├── main.py                  # 主入口
-│   ├── server.py                # 服务器实现
+├── warp2api-main/               # Warp2API主服务
+│   ├── openai_compat.py         # OpenAI兼容API服务器（被统一网关挂载）
+│   ├── server.py                # Protobuf桥接服务器（被统一网关挂载）
 │   ├── config.py                # 配置管理
 │   ├── requirements.txt         # Python依赖
 │   ├── account_pool_client.py   # 账号池服务客户端
@@ -31,15 +31,19 @@ warp2api/
 │   └── protobuf2openai/         # OpenAI兼容层
 │       └── app.py              # OpenAI接口实现
 │
-├── start_services.sh            # 启动脚本
-├── stop_services.sh            # 停止脚本
+├── unified_server.py            # 统一网关（单端口 8080）
+├── scripts/
+│   ├── start_unified.sh         # 本地开发一键启动
+│   ├── build_image.sh           # 构建镜像
+│   └── run_container.sh         # 运行容器
+├── Dockerfile                   # 容器化构建
 ├── test_pool_service.py        # 测试脚本
 └── logs/                       # 日志目录（运行时创建）
     ├── pool-service.log       # 账号池服务日志
     └── warp2api.log          # 主服务日志
 ```
 
-## 架构设计
+## 架构设计（统一端口 8080）
 
 ### 1. 账号池服务 (Account Pool Service)
 独立的微服务，负责管理Warp账号的全生命周期：
@@ -52,10 +56,10 @@ warp2api/
   - 会话管理（分配/释放账号）
   - RESTful API接口
 
-### 2. Warp2API服务
-主服务，提供OpenAI兼容的API接口：
+### 2. Warp2API服务（统一挂载）
+主服务（OpenAI兼容 + Protobuf桥接）由统一网关在 8080 端口挂载：
 
-- **端口**: 8018
+- **端口**: 8080（前缀 `/v1/**` 与 `/bridge/**`）
 - **功能**:
   - 从账号池服务获取账号
   - 转换Warp API为OpenAI格式

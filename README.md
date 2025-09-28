@@ -49,27 +49,29 @@ pip install -r account-pool-service/requirements.txt
 pip install flask flask-cors requests
 ```
 
-### 2. 启动服务
+### 2. 启动服务（统一 8080 单端口）
 
-#### 启动主服务（推荐）
 ```bash
-# 一键启动所有核心服务
-./start_services.sh
+# 本地（推荐）
+bash scripts/start_unified.sh
+
+# 或容器化
+bash scripts/build_image.sh
+bash scripts/run_container.sh
 ```
 
-#### 启动账号管理器（可选）
-```bash
-# 启动可视化账号管理器
-python3 proxy_server.py
-# 或使用启动脚本
-./start_account_manager.sh
-```
+统一网关地址：
+- http://localhost:8080
 
-服务将在以下端口运行：
-- **Protobuf桥接服务**: http://localhost:8000
-- **OpenAI兼容API**: http://localhost:8010
-- **账号池服务**: http://localhost:8019
-- **账号管理器**: http://localhost:8021
+路径映射：
+- **OpenAI兼容API**: `http://localhost:8080/v1/...`（路径不变）
+- **Protobuf桥接**: `http://localhost:8080/bridge/...`（原 8000 的 `/api/**`、`/healthz`、`/ws`）
+- **账号池服务**: `http://localhost:8080/pool/...`（原 8019）
+- **账号管理器UI**: `http://localhost:8080/manager/account.html`（根路径也提供 `/account.html`）
+- **账号管理器API（根路径保留）**:
+  - `POST /proxy/warp-token`
+  - `POST /api/test-database`
+  - `POST /api/import-account`
 
 ### 3. 停止服务
 
@@ -186,19 +188,14 @@ tail -f logs/account-manager.log
 tail -f logs/*.log
 ```
 
-### 服务状态检查
+### 服务状态检查（统一）
 ```bash
-# 账号池健康检查
-curl http://localhost:8019/health
+# 统一健康检查
+curl http://localhost:8080/healthz
 
-# Protobuf桥接服务健康检查
-curl http://localhost:8000/healthz
-
-# OpenAI兼容API健康检查
-curl http://localhost:8010/healthz
-
-# 账号管理器健康检查
-curl http://localhost:8021/
+# 子组件（通过前缀）
+curl http://localhost:8080/bridge/healthz
+curl http://localhost:8080/pool/health
 ```
 
 ## ⚙️ 配置
@@ -206,21 +203,25 @@ curl http://localhost:8021/
 ### 环境变量
 
 ```bash
-# 服务端口配置
-export WARP_BRIDGE_PORT="8000"      # Protobuf桥接服务端口
-export OPENAI_API_PORT="8010"       # OpenAI兼容API端口
-export POOL_SERVICE_PORT="8019"     # 账号池服务端口
-export ACCOUNT_MANAGER_PORT="8021"  # 账号管理器端口
+# 统一端口
+export PORT=8080
 
-# 账号池服务配置
-export POOL_SERVICE_URL="http://localhost:8019"
+# 账号池 & 桥接（统一前缀）
+export POOL_SERVICE_URL="http://localhost:8080/pool"
+export BRIDGE_BASE_URL="http://localhost:8080/bridge"
 export USE_POOL_SERVICE="true"
-export MIN_POOL_SIZE="5"    # 最少账号数
-export MAX_POOL_SIZE="50"   # 最大账号数
 
-# Warp认证配置
+# 账号池阈值
+export MIN_POOL_SIZE="5"
+export MAX_POOL_SIZE="50"
+
+# Warp 认证
 export WARP_JWT="your-jwt-token"
 export WARP_REFRESH_TOKEN="your-refresh-token"
+
+# MoeMail（从环境读取，提供默认值）
+export MOEMAIL_BASE_URL="https://email.959585.xyz"
+export MOEMAIL_API_KEY=""
 
 # 日志级别
 export LOG_LEVEL="INFO"

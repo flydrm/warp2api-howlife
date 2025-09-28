@@ -6,6 +6,7 @@
 """
 
 from typing import Dict, Any, Optional
+import os
 
 
 def load_config() -> Dict[str, Any]:
@@ -15,10 +16,14 @@ def load_config() -> Dict[str, Any]:
     Returns:
         配置字典
     """
+    moemail_base_url = os.getenv("MOEMAIL_BASE_URL", "https://email.959585.xyz")
+    moemail_api_key = os.getenv("MOEMAIL_API_KEY", "mk_IpnNUYb8KgdCTJLokCgAthP7OVirjIqX")
+
     return {
-        "api_key": "mk_IpnNUYb8KgdCTJLokCgAthP7OVirjIqX",
-        "moemail_url": "https://email.959585.xyz",
-        "moemail_api_key": "mk_IpnNUYb8KgdCTJLokCgAthP7OVirjIqX",
+        # Backward compatibility: some modules read `api_key`, others read `moemail_api_key`
+        "api_key": moemail_api_key,
+        "moemail_url": moemail_base_url,
+        "moemail_api_key": moemail_api_key,
         "register_url": "https://app.warp.dev",
         "login_url": "https://app.warp.dev/login",
         "email_prefix": "warp",
@@ -32,8 +37,8 @@ def load_config() -> Dict[str, Any]:
         "firebase_api_key": "AIzaSyBdy3O3S9hrdayLJxJ7mriBR4qgUaUygAs",
         # moemail 嵌套结构
         "moemail": {
-            "base_url": "https://email.959585.xyz",
-            "api_key": "mk_IpnNUYb8KgdCTJLokCgAthP7OVirjIqX"
+            "base_url": moemail_base_url,
+            "api_key": moemail_api_key
         }
     }
 

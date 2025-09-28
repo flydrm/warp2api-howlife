@@ -45,8 +45,13 @@ class MoeMailClient:
             base_url: MoeMail 服务器地址
             api_key: API 密钥
         """
-        self.base_url = base_url.rstrip('/')
-        self.api_key = api_key
+        # 允许从环境变量覆盖（保留传参为默认值）
+        import os as _os
+        env_base = _os.getenv("MOEMAIL_BASE_URL", base_url or "https://email.959585.xyz")
+        env_key = _os.getenv("MOEMAIL_API_KEY", api_key or "")
+
+        self.base_url = env_base.rstrip('/')
+        self.api_key = env_key
         self.session = requests.Session()
         
         # 配置连接池和重试策略
@@ -70,7 +75,7 @@ class MoeMailClient:
         
         # 设置请求头
         self.session.headers.update({
-            'X-API-Key': api_key,
+            'X-API-Key': self.api_key,
             'Content-Type': 'application/json',
             'Connection': 'keep-alive',  # 启用Keep-Alive
             'User-Agent': 'MoeMailClient/1.0'
