@@ -28,9 +28,11 @@ class SessionContext:
     created_at: datetime
     last_used: datetime
     
-    def is_expired(self, timeout_minutes: int = 30) -> bool:
+    def is_expired(self, timeout_seconds: int = None) -> bool:
         """检查会话是否超时"""
-        return datetime.now() - self.last_used > timedelta(minutes=timeout_minutes)
+        if timeout_seconds is None:
+            timeout_seconds = config.SESSION_TIMEOUT
+        return datetime.now() - self.last_used > timedelta(seconds=timeout_seconds)
 
 
 class PoolManager:
@@ -45,6 +47,16 @@ class PoolManager:
         self._sessions: Dict[str, SessionContext] = {}
         self._maintenance_task = None
         self._running = False
+        
+        # 429错误统计
+        self._429_stats = {
+            'total_429_errors': 0,
+            'deleted_accounts': 0,
+            'retry_successes': 0,
+            'retry_failures': 0,
+            'last_429_time': None,
+            'hourly_deletes': []  # 每小时删除数记录
+        }
         logger.info("号池管理器初始化完成")
     
     async def start(self):
@@ -100,10 +112,41 @@ class PoolManager:
         
         logger.info(f"为请求分配账号: {session_id}")
         
+        # 检查是否已有绑定的账号（基于 IP 的 session 复用）
+        with self._lock:
+            if session_id in self._sessions:
+                # 会话已存在，返回已分配的账号
+                session_context = self._sessions[session_id]
+                # 更新会话活跃时间
+                session_context.last_used = datetime.now()
+                logger.info(f"复用已有会话的账号: {session_id}, 账号数: {len(session_context.accounts)}")
+                return session_context.accounts
+        
+        # 检查数据库中是否有该 session 的账号（可能是服务重启后的恢复）
+        existing_accounts = self.db.get_accounts_by_session(session_id)
+        if existing_accounts:
+            logger.info(f"从数据库恢复会话账号: {session_id}, 账号数: {len(existing_accounts)}")
+            
+            # 检查并刷新过期的token
+            refreshed_accounts = await self._check_and_refresh_tokens(existing_accounts)
+            if refreshed_accounts:
+                existing_accounts = refreshed_accounts
+            
+            # 创建会话上下文
+            session_context = SessionContext(
+                session_id=session_id,
+                accounts=existing_accounts,
+                created_at=datetime.now(),
+                last_used=datetime.now()
+            )
+            with self._lock:
+                self._sessions[session_id] = session_context
+            return existing_accounts
+        
         # 确保有足够的可用账号
         await self._ensure_minimum_accounts()
         
-        # 从数据库分配账号
+        # 从数据库分配新账号
         accounts = self.db.allocate_accounts_for_session(session_id, config.ACCOUNTS_PER_REQUEST)
         
         if not accounts:
@@ -135,17 +178,47 @@ class PoolManager:
         logger.success(f"成功为请求 {session_id} 分配 {len(accounts)} 个账号")
         return accounts
     
-    async def release_accounts_for_request(self, session_id: str) -> bool:
-        """释放请求的账号"""
-        logger.info(f"释放请求的账号: {session_id}")
+    async def release_accounts_for_request(self, session_id: str, delete_accounts: bool = False) -> bool:
+        """释放请求的账号，可选择删除（429错误时）"""
+        action = "删除" if delete_accounts else "释放"
+        logger.info(f"{action}请求的账号: {session_id}")
         
         # 从会话记录中移除
         with self._lock:
             if session_id in self._sessions:
                 del self._sessions[session_id]
         
-        # 在数据库中释放账号
-        return self.db.release_accounts_for_session(session_id)
+        # 在数据库中释放或删除账号
+        success = self.db.release_accounts_for_session(session_id, delete_accounts)
+        
+        # 更新429统计
+        if delete_accounts and success:
+            with self._lock:
+                self._429_stats['total_429_errors'] += 1
+                self._429_stats['deleted_accounts'] += 1
+                self._429_stats['last_429_time'] = datetime.now()
+                
+                # 记录每小时删除数
+                current_hour = datetime.now().strftime("%Y-%m-%d %H:00")
+                self._429_stats['hourly_deletes'].append({
+                    'hour': current_hour,
+                    'timestamp': datetime.now()
+                })
+                
+                # 只保留最近24小时的记录
+                cutoff_time = datetime.now() - timedelta(hours=24)
+                self._429_stats['hourly_deletes'] = [
+                    record for record in self._429_stats['hourly_deletes']
+                    if record['timestamp'] > cutoff_time
+                ]
+            
+            # 检查是否需要补充
+            await self._check_and_replenish_pool()
+            
+            # 检查删除率是否过高
+            await self._check_429_alert()
+        
+        return success
     
     async def get_pool_status(self) -> Dict[str, any]:
         """获取账号池状态"""
@@ -153,6 +226,13 @@ class PoolManager:
         
         with self._lock:
             active_sessions_count = len(self._sessions)
+            
+            # 计算最近1小时的删除数
+            one_hour_ago = datetime.now() - timedelta(hours=1)
+            hourly_deletes = len([
+                record for record in self._429_stats['hourly_deletes']
+                if record['timestamp'] > one_hour_ago
+            ])
         
         status = {
             "pool_stats": stats,
@@ -160,7 +240,13 @@ class PoolManager:
             "running": self._running,
             "min_pool_size": config.MIN_POOL_SIZE,
             "accounts_per_request": config.ACCOUNTS_PER_REQUEST,
-            "health": self._check_pool_health(stats)
+            "health": self._check_pool_health(stats),
+            "429_stats": {
+                "total_429_errors": self._429_stats['total_429_errors'],
+                "deleted_accounts": self._429_stats['deleted_accounts'],
+                "hourly_deletes": hourly_deletes,
+                "last_429_time": self._429_stats['last_429_time'].isoformat() if self._429_stats['last_429_time'] else None
+            }
         }
         
         return status
@@ -178,6 +264,24 @@ class PoolManager:
             return "low"
         else:
             return "critical"
+    
+    async def _check_429_alert(self):
+        """检查429错误率是否需要告警"""
+        # 计算最近1小时的删除数
+        one_hour_ago = datetime.now() - timedelta(hours=1)
+        hourly_deletes = len([
+            record for record in self._429_stats['hourly_deletes']
+            if record['timestamp'] > one_hour_ago
+        ])
+        
+        # 如果1小时内删除超过100个账号，发出告警
+        if hourly_deletes > 100:
+            logger.error(f"⚠️ 429错误率过高！最近1小时删除了 {hourly_deletes} 个账号")
+            
+        # 如果账号池即将耗尽，发出紧急告警
+        stats = self.db.get_pool_statistics()
+        if stats.get('available', 0) < 5:
+            logger.critical(f"🚨 账号池即将耗尽！仅剩 {stats.get('available', 0)} 个可用账号")
     
     async def _ensure_minimum_accounts(self):
         """确保最少账号数量"""

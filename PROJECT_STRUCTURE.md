@@ -51,6 +51,7 @@ warp2api/
   - Token刷新（遵守1小时限制）
   - 会话管理（分配/释放账号）
   - RESTful API接口
+  - 429错误处理（删除问题账号、分配新账号）
 
 ### 2. Warp2API服务
 主服务，提供OpenAI兼容的API接口：
@@ -61,6 +62,8 @@ warp2api/
   - 转换Warp API为OpenAI格式
   - 处理聊天请求（流式/非流式）
   - 管理客户端会话
+  - 429错误自动重试（最多MAX_429_RETRY_LIMIT次）
+  - IP会话绑定（同一IP复用相同账号）
 
 ## 核心组件说明
 
@@ -69,6 +72,7 @@ warp2api/
 - 自动补充不足的账号
 - 清理过期会话（30分钟超时）
 - 线程安全的并发控制
+- 429错误统计和告警（每小时删除超100个告警）
 
 ### 批量注册器 (BatchRegister)
 - 使用MoeMail临时邮箱服务
@@ -114,13 +118,35 @@ POST http://localhost:8019/api/accounts/release
 Content-Type: application/json
 
 {
-    "session_id": "session_id_to_release"
+    "session_id": "session_id_to_release",
+    "delete_account": false,  // true时删除账号（429错误时使用）
+    "reason": "normal_release"  // 可选，记录原因
 }
 ```
 
 #### 获取状态
 ```http
 GET http://localhost:8019/api/accounts/status
+```
+
+响应示例（包含429统计）：
+```json
+{
+    "pool_stats": {
+        "available": 15,
+        "in_use": 3,
+        "total": 18
+    },
+    "active_sessions": 3,
+    "running": true,
+    "health": "healthy",
+    "429_stats": {
+        "total_429_errors": 23,
+        "deleted_accounts": 23,
+        "hourly_deletes": 8,
+        "last_429_time": "2024-01-XX T10:30:45"
+    }
+}
 ```
 
 ### Warp2API服务（OpenAI兼容）
@@ -206,6 +232,14 @@ POOL_SERVICE_HOST=0.0.0.0
 POOL_SERVICE_PORT=8019
 MIN_POOL_SIZE=5
 MAX_POOL_SIZE=50
+
+# 429错误处理（新增 v1.1.0）
+MAX_429_RETRY_LIMIT=3
+ENABLE_429_AUTO_SWITCH=true
+
+# IP会话绑定（新增 v1.2.0）
+ENABLE_IP_BINDING=true
+SESSION_TIMEOUT=1800
 
 # 主服务
 HOST=0.0.0.0

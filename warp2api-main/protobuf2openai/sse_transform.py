@@ -7,11 +7,13 @@ from typing import Any, AsyncGenerator, Dict
 import httpx
 from .logging import logger
 
-from .config import BRIDGE_BASE_URL
+from .config import BRIDGE_BASE_URL, MAX_429_RETRY_LIMIT, ENABLE_429_AUTO_SWITCH, POOL_SERVICE_URL, USE_POOL_SERVICE
 from .helpers import _get
+import requests
 
 
-async def stream_openai_sse(packet: Dict[str, Any], completion_id: str, created_ts: int, model_id: str) -> AsyncGenerator[str, None]:
+async def stream_openai_sse(packet: Dict[str, Any], completion_id: str, created_ts: int, model_id: str,
+                          session_id: str = None, retry_count: int = 0, deleted_accounts: list = None) -> AsyncGenerator[str, None]:
     try:
         first = {
             "id": completion_id,
@@ -41,11 +43,44 @@ async def stream_openai_sse(packet: Dict[str, Any], completion_id: str, created_
             response_cm = _do_stream()
             async with response_cm as response:
                 if response.status_code == 429:
+                    # 处理429错误
+                    if ENABLE_429_AUTO_SWITCH and USE_POOL_SERVICE and session_id:
+                        try:
+                            # 同步调用账号池服务（在异步函数中使用requests）
+                            release_resp = requests.post(
+                                f"{POOL_SERVICE_URL}/api/accounts/release",
+                                json={
+                                    "session_id": session_id,
+                                    "delete_account": True,
+                                    "reason": f"429_error_stream"
+                                },
+                                timeout=5.0
+                            )
+                            
+                            if release_resp.status_code == 200:
+                                logger.info(f"[OpenAI Compat] 流式请求：成功删除429账号")
+                                
+                                # 获取新账号
+                                allocate_resp = requests.post(
+                                    f"{POOL_SERVICE_URL}/api/accounts/allocate",
+                                    json={"session_id": session_id},
+                                    timeout=5.0
+                                )
+                                
+                                if allocate_resp.status_code == 200:
+                                    logger.info(f"[OpenAI Compat] 流式请求：获取新账号成功")
+                                    # 抛出特定异常，让外层重试
+                                    raise RuntimeError("429_retry_with_new_account")
+                        except requests.exceptions.RequestException as e:
+                            logger.error(f"[OpenAI Compat] 账号池服务调用失败: {e}")
+                    
+                    # 默认处理：尝试刷新JWT
                     try:
                         r = await client.post(f"{BRIDGE_BASE_URL}/api/auth/refresh", timeout=10.0)
                         logger.warning("[OpenAI Compat] Bridge returned 429. Tried JWT refresh -> HTTP %s", r.status_code)
                     except Exception as _e:
                         logger.warning("[OpenAI Compat] JWT refresh attempt failed after 429: %s", _e)
+                    
                     # 重试一次
                     response_cm2 = _do_stream()
                     async with response_cm2 as response2:

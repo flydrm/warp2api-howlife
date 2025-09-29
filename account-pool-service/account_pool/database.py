@@ -172,6 +172,48 @@ class AccountDatabase:
             
             return accounts
     
+    def get_accounts_by_session(self, session_id: str) -> List[Account]:
+        """获取会话已绑定的账号"""
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute('''
+                    SELECT * FROM accounts 
+                    WHERE session_id = ? AND status = 'in_use'
+                ''', (session_id,))
+                
+                rows = cursor.fetchall()
+                accounts = []
+                for row in rows:
+                    account = Account(
+                        id=row['id'],
+                        email=row['email'],
+                        local_id=row['local_id'],
+                        id_token=row['id_token'],
+                        refresh_token=row['refresh_token'],
+                        status=row['status'],
+                        created_at=datetime.fromisoformat(row['created_at']) if row['created_at'] else None,
+                        last_used=datetime.fromisoformat(row['last_used']) if row['last_used'] else None,
+                        last_refresh_time=datetime.fromisoformat(row['last_refresh_time']) if row['last_refresh_time'] else None,
+                        use_count=row['use_count'] or 0,
+                        session_id=row['session_id']
+                    )
+                    accounts.append(account)
+                
+                if accounts:
+                    # 更新最后使用时间
+                    cursor.execute('''
+                        UPDATE accounts 
+                        SET last_used = ? 
+                        WHERE session_id = ?
+                    ''', (datetime.now(), session_id))
+                    cursor.connection.commit()
+                
+                return accounts
+                
+        except Exception as e:
+            logger.error(f"获取会话账号失败: {e}")
+            return []
+    
     def allocate_accounts_for_session(self, session_id: str, count: int = None) -> List[Account]:
         """为会话分配指定数量的账号"""
         if count is None:
@@ -238,20 +280,40 @@ class AccountDatabase:
             logger.error(f"分配账号失败: {e}")
             return []
     
-    def release_accounts_for_session(self, session_id: str) -> bool:
-        """释放会话的所有账号"""
+    def release_accounts_for_session(self, session_id: str, delete_accounts: bool = False) -> bool:
+        """释放会话的所有账号，可选择删除账号"""
         try:
             with self._get_cursor() as cursor:
-                cursor.execute('''
-                    UPDATE accounts 
-                    SET status = 'available', session_id = NULL 
-                    WHERE session_id = ?
-                ''', (session_id,))
+                if delete_accounts:
+                    # 先获取要删除的账号邮箱（用于日志）
+                    cursor.execute('''
+                        SELECT email FROM accounts 
+                        WHERE session_id = ? 
+                    ''', (session_id,))
+                    accounts_to_delete = [row[0] for row in cursor.fetchall()]
+                    
+                    # 删除账号（429错误时使用）
+                    cursor.execute('''
+                        DELETE FROM accounts 
+                        WHERE session_id = ?
+                    ''', (session_id,))
+                    
+                    deleted_count = cursor.rowcount
+                    if deleted_count > 0:
+                        logger.warning(f"删除了会话 {session_id} 的 {deleted_count} 个账号（429错误）: {accounts_to_delete}")
+                else:
+                    # 正常释放：更新账号状态
+                    cursor.execute('''
+                        UPDATE accounts 
+                        SET status = 'available', session_id = NULL 
+                        WHERE session_id = ?
+                    ''', (session_id,))
+                    
+                    affected_rows = cursor.rowcount
+                    if affected_rows > 0:
+                        logger.info(f"成功释放会话 {session_id} 的 {affected_rows} 个账号")
                 
-                affected_rows = cursor.rowcount
                 cursor.connection.commit()
-                
-                logger.info(f"成功释放会话 {session_id} 的 {affected_rows} 个账号")
                 return True
         except Exception as e:
             logger.error(f"释放账号失败: {e}")

@@ -12,6 +12,8 @@
 - **并发安全**: 支持多进程并发调用，线程安全
 - **智能降级**: 账号池不可用时自动降级到临时账号
 - **RESTful API**: 标准的HTTP接口，易于集成
+- **⚡ 429错误自动处理**: 遇到速率限制时自动切换账号，无需等待（v1.1.0新增）
+- **🔗 IP会话绑定**: 同一IP地址自动复用相同账号，提高稳定性（v1.2.0新增）
 
 ## 📁 项目结构
 
@@ -218,6 +220,12 @@ export USE_POOL_SERVICE="true"
 export MIN_POOL_SIZE="5"    # 最少账号数
 export MAX_POOL_SIZE="50"   # 最大账号数
 
+# 429错误处理配置（新增）
+export MAX_429_RETRY_LIMIT="3"      # 最大重试次数
+export ENABLE_429_AUTO_SWITCH="true" # 启用自动切换
+export ENABLE_IP_BINDING="true"     # 启用IP会话绑定
+export SESSION_TIMEOUT="1800"       # 会话超时时间（秒）
+
 # Warp认证配置
 export WARP_JWT="your-jwt-token"
 export WARP_REFRESH_TOKEN="your-refresh-token"
@@ -253,6 +261,25 @@ export LOG_LEVEL="INFO"
   curl -X POST http://localhost:8019/api/accounts/replenish \
     -d '{"count": 10}'
   ```
+
+### 429错误处理（新增 v1.1.0）
+- 系统会自动删除触发429的账号并切换新账号
+- 查看429统计信息：
+  ```bash
+  curl http://localhost:8019/api/accounts/status | jq '.["429_stats"]'
+  ```
+- 如果删除率过高，系统会自动告警
+- 可通过 `MAX_429_RETRY_LIMIT` 调整重试次数
+
+### IP会话绑定（新增 v1.2.0）
+- 同一IP地址的请求会自动绑定到相同账号
+- 减少账号切换，提高会话稳定性
+- 会话超时后自动释放账号供其他IP使用
+- 查看当前会话绑定状态：
+  ```bash
+  curl http://localhost:8019/api/accounts/status | jq '.sessions'
+  ```
+- 可通过 `ENABLE_IP_BINDING=false` 禁用此功能
 ### SQLlite命令样式
 
 * 添加账号的命令:
