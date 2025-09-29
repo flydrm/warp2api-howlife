@@ -17,7 +17,7 @@ from .reorder import reorder_messages_for_anthropic
 from .helpers import normalize_content_to_list, segments_to_text
 from .packets import packet_template, map_history_to_warp_messages, attach_user_and_tools_to_inputs
 from .state import STATE
-from .config import BRIDGE_BASE_URL
+from .config import BRIDGE_BASE_URL, MAX_429_RETRY_LIMIT, ENABLE_429_AUTO_SWITCH, POOL_SERVICE_URL, USE_POOL_SERVICE
 from .bridge import initialize_once
 from .sse_transform import stream_openai_sse
 
@@ -137,10 +137,29 @@ async def chat_completions(req: ChatCompletionsRequest):
     completion_id = str(uuid.uuid4())
     model_id = req.model or "warp-default"
 
+    # 生成会话ID（用于账号池管理）
+    session_id = str(uuid.uuid4())
+    retry_count = 0
+    deleted_accounts = []
+    
     if req.stream:
         async def _agen():
-            async for chunk in stream_openai_sse(packet, completion_id, created_ts, model_id):
-                yield chunk
+            nonlocal retry_count, deleted_accounts
+            
+            while retry_count < MAX_429_RETRY_LIMIT:
+                try:
+                    async for chunk in stream_openai_sse(packet, completion_id, created_ts, model_id, 
+                                                       session_id, retry_count, deleted_accounts):
+                        yield chunk
+                    break  # 成功完成，退出循环
+                except RuntimeError as e:
+                    if "429" in str(e) and ENABLE_429_AUTO_SWITCH and retry_count < MAX_429_RETRY_LIMIT - 1:
+                        retry_count += 1
+                        logger.warning(f"[OpenAI Compat] 流式请求429错误，尝试切换账号 ({retry_count}/{MAX_429_RETRY_LIMIT})")
+                        continue
+                    else:
+                        raise
+                        
         return StreamingResponse(_agen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
 
     def _post_once() -> requests.Response:
@@ -150,20 +169,75 @@ async def chat_completions(req: ChatCompletionsRequest):
             timeout=(5.0, 180.0),
         )
 
-    try:
-        resp = _post_once()
-        if resp.status_code == 429:
-            try:
-                r = requests.post(f"{BRIDGE_BASE_URL}/api/auth/refresh", timeout=10.0)
-                logger.warning("[OpenAI Compat] Bridge returned 429. Tried JWT refresh -> HTTP %s", getattr(r, 'status_code', 'N/A'))
-            except Exception as _e:
-                logger.warning("[OpenAI Compat] JWT refresh attempt failed after 429: %s", _e)
+    # 非流式请求的429处理
+    while retry_count < MAX_429_RETRY_LIMIT:
+        try:
             resp = _post_once()
-        if resp.status_code != 200:
-            raise HTTPException(resp.status_code, f"bridge_error: {resp.text}")
-        bridge_resp = resp.json()
-    except Exception as e:
-        raise HTTPException(502, f"bridge_unreachable: {e}")
+            
+            if resp.status_code == 429 and ENABLE_429_AUTO_SWITCH:
+                retry_count += 1
+                
+                if retry_count >= MAX_429_RETRY_LIMIT:
+                    logger.warning(f"[OpenAI Compat] 达到429重试上限 ({MAX_429_RETRY_LIMIT}次)")
+                    raise HTTPException(429, "达到重试上限")
+                
+                # 处理429错误：释放并删除当前账号
+                if USE_POOL_SERVICE:
+                    try:
+                        # 释放并删除账号
+                        release_resp = requests.post(
+                            f"{POOL_SERVICE_URL}/api/accounts/release",
+                            json={
+                                "session_id": session_id,
+                                "delete_account": True,
+                                "reason": f"429_error_retry_{retry_count}"
+                            },
+                            timeout=5.0
+                        )
+                        
+                        if release_resp.status_code == 200:
+                            result = release_resp.json()
+                            logger.info(f"[OpenAI Compat] 成功删除429账号，会话: {session_id}")
+                            
+                            # 获取新账号
+                            allocate_resp = requests.post(
+                                f"{POOL_SERVICE_URL}/api/accounts/allocate",
+                                json={"session_id": session_id},
+                                timeout=5.0
+                            )
+                            
+                            if allocate_resp.status_code == 200:
+                                logger.info(f"[OpenAI Compat] 获取新账号成功，立即重试")
+                                continue  # 使用新账号重试
+                            else:
+                                logger.error(f"[OpenAI Compat] 获取新账号失败: {allocate_resp.text}")
+                                raise HTTPException(503, "账号池已耗尽")
+                    except requests.exceptions.RequestException as e:
+                        logger.error(f"[OpenAI Compat] 账号池服务调用失败: {e}")
+                
+                # 如果账号池不可用，尝试刷新JWT
+                try:
+                    r = requests.post(f"{BRIDGE_BASE_URL}/api/auth/refresh", timeout=10.0)
+                    logger.warning(f"[OpenAI Compat] 尝试JWT刷新: {r.status_code}")
+                except Exception as _e:
+                    logger.warning(f"[OpenAI Compat] JWT刷新失败: {_e}")
+                
+                continue  # 重试
+                
+            elif resp.status_code != 200:
+                raise HTTPException(resp.status_code, f"bridge_error: {resp.text}")
+            else:
+                # 成功响应
+                bridge_resp = resp.json()
+                break
+                
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"[OpenAI Compat] 请求失败 (尝试 {retry_count + 1}): {e}")
+            if retry_count >= MAX_429_RETRY_LIMIT - 1:
+                raise HTTPException(502, f"bridge_unreachable: {e}")
+            retry_count += 1
 
     try:
         STATE.conversation_id = bridge_resp.get("conversation_id") or STATE.conversation_id

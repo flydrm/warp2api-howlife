@@ -28,6 +28,8 @@ class AllocateAccountRequest(BaseModel):
 class ReleaseAccountRequest(BaseModel):
     """释放账号请求"""
     session_id: str = Field(..., description="要释放的会话ID")
+    delete_account: Optional[bool] = Field(False, description="是否删除账号（429错误时为True）")
+    reason: Optional[str] = Field(None, description="删除原因")
 
 class RefreshTokenRequest(BaseModel):
     """刷新Token请求"""
@@ -178,17 +180,25 @@ async def release_accounts(request: ReleaseAccountRequest):
         raise HTTPException(status_code=503, detail="服务不可用")
     
     try:
-        success = await pool_manager.release_accounts_for_request(request.session_id)
+        success = await pool_manager.release_accounts_for_request(
+            request.session_id, 
+            delete_accounts=request.delete_account
+        )
+        
+        action = "删除" if request.delete_account else "释放"
+        if request.delete_account and request.reason:
+            logger.info(f"删除账号原因: {request.reason}")
         
         if success:
             return {
                 "success": True,
-                "message": f"成功释放会话 {request.session_id} 的账号"
+                "message": f"成功{action}会话 {request.session_id} 的账号",
+                "action": action
             }
         else:
             return {
                 "success": False,
-                "message": f"释放会话 {request.session_id} 失败"
+                "message": f"{action}会话 {request.session_id} 失败"
             }
             
     except Exception as e:

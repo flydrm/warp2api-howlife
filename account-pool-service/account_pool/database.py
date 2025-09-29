@@ -238,20 +238,40 @@ class AccountDatabase:
             logger.error(f"分配账号失败: {e}")
             return []
     
-    def release_accounts_for_session(self, session_id: str) -> bool:
-        """释放会话的所有账号"""
+    def release_accounts_for_session(self, session_id: str, delete_accounts: bool = False) -> bool:
+        """释放会话的所有账号，可选择删除账号"""
         try:
             with self._get_cursor() as cursor:
-                cursor.execute('''
-                    UPDATE accounts 
-                    SET status = 'available', session_id = NULL 
-                    WHERE session_id = ?
-                ''', (session_id,))
+                if delete_accounts:
+                    # 先获取要删除的账号邮箱（用于日志）
+                    cursor.execute('''
+                        SELECT email FROM accounts 
+                        WHERE session_id = ? 
+                    ''', (session_id,))
+                    accounts_to_delete = [row[0] for row in cursor.fetchall()]
+                    
+                    # 删除账号（429错误时使用）
+                    cursor.execute('''
+                        DELETE FROM accounts 
+                        WHERE session_id = ?
+                    ''', (session_id,))
+                    
+                    deleted_count = cursor.rowcount
+                    if deleted_count > 0:
+                        logger.warning(f"删除了会话 {session_id} 的 {deleted_count} 个账号（429错误）: {accounts_to_delete}")
+                else:
+                    # 正常释放：更新账号状态
+                    cursor.execute('''
+                        UPDATE accounts 
+                        SET status = 'available', session_id = NULL 
+                        WHERE session_id = ?
+                    ''', (session_id,))
+                    
+                    affected_rows = cursor.rowcount
+                    if affected_rows > 0:
+                        logger.info(f"成功释放会话 {session_id} 的 {affected_rows} 个账号")
                 
-                affected_rows = cursor.rowcount
                 cursor.connection.commit()
-                
-                logger.info(f"成功释放会话 {session_id} 的 {affected_rows} 个账号")
                 return True
         except Exception as e:
             logger.error(f"释放账号失败: {e}")

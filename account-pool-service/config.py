@@ -63,6 +63,10 @@ class Config:
     MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", 10))
     REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", 30))
     
+    # 429错误处理配置
+    MAX_429_RETRY_LIMIT = int(os.getenv("MAX_429_RETRY_LIMIT", 3))  # 最大重试次数
+    ENABLE_429_AUTO_SWITCH = os.getenv("ENABLE_429_AUTO_SWITCH", "true").lower() == "true"  # 是否启用自动切换
+    
     # 性能优化配置
     HTTP_KEEPALIVE = int(os.getenv("HTTP_KEEPALIVE", 30))  # Keep-Alive超时
     CONNECTION_POOL_SIZE = int(os.getenv("CONNECTION_POOL_SIZE", 10))  # 连接池大小
