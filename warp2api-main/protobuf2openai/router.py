@@ -4,10 +4,11 @@ import asyncio
 import json
 import time
 import uuid
+import hashlib
 from typing import Any, Dict, List, Optional
 
 import requests
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from .logging import logger
@@ -17,7 +18,7 @@ from .reorder import reorder_messages_for_anthropic
 from .helpers import normalize_content_to_list, segments_to_text
 from .packets import packet_template, map_history_to_warp_messages, attach_user_and_tools_to_inputs
 from .state import STATE
-from .config import BRIDGE_BASE_URL, MAX_429_RETRY_LIMIT, ENABLE_429_AUTO_SWITCH, POOL_SERVICE_URL, USE_POOL_SERVICE
+from .config import BRIDGE_BASE_URL, MAX_429_RETRY_LIMIT, ENABLE_429_AUTO_SWITCH, POOL_SERVICE_URL, USE_POOL_SERVICE, ENABLE_IP_BINDING
 from .bridge import initialize_once
 from .sse_transform import stream_openai_sse
 
@@ -54,7 +55,7 @@ def list_models():
 
 
 @router.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionsRequest):
+async def chat_completions(req: ChatCompletionsRequest, request: Request):
     try:
         initialize_once()
     except Exception as e:
@@ -137,8 +138,28 @@ async def chat_completions(req: ChatCompletionsRequest):
     completion_id = str(uuid.uuid4())
     model_id = req.model or "warp-default"
 
-    # 生成会话ID（用于账号池管理）
-    session_id = str(uuid.uuid4())
+    # 生成会话ID
+    if ENABLE_IP_BINDING:
+        # 获取客户端 IP 地址
+        client_ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        if not client_ip:
+            client_ip = request.headers.get("X-Real-IP", "")
+        if not client_ip and hasattr(request.client, 'host'):
+            client_ip = request.client.host
+        
+        # 如果无法获取 IP，使用随机 session_id
+        if not client_ip:
+            session_id = str(uuid.uuid4())
+            logger.warning("[OpenAI Compat] 无法获取客户端 IP，使用随机 session_id")
+        else:
+            # 基于 IP 生成稳定的 session_id
+            session_id = f"ip_{hashlib.md5(client_ip.encode()).hexdigest()[:16]}"
+            logger.info(f"[OpenAI Compat] 客户端 IP: {client_ip}, Session ID: {session_id}")
+    else:
+        # 不启用 IP 绑定时，每次请求使用新的 session_id
+        session_id = str(uuid.uuid4())
+        logger.debug(f"[OpenAI Compat] IP 绑定已禁用，使用随机 session_id: {session_id}")
+    
     retry_count = 0
     deleted_accounts = []
     

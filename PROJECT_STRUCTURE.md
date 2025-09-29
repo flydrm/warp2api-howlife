@@ -63,6 +63,7 @@ warp2api/
   - 处理聊天请求（流式/非流式）
   - 管理客户端会话
   - 429错误自动重试（最多MAX_429_RETRY_LIMIT次）
+  - IP会话绑定（同一IP复用相同账号）
 
 ## 核心组件说明
 
@@ -232,9 +233,13 @@ POOL_SERVICE_PORT=8019
 MIN_POOL_SIZE=5
 MAX_POOL_SIZE=50
 
-# 429错误处理（新增）
+# 429错误处理（新增 v1.1.0）
 MAX_429_RETRY_LIMIT=3
 ENABLE_429_AUTO_SWITCH=true
+
+# IP会话绑定（新增 v1.2.0）
+ENABLE_IP_BINDING=true
+SESSION_TIMEOUT=1800
 
 # 主服务
 HOST=0.0.0.0

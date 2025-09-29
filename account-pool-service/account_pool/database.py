@@ -172,6 +172,48 @@ class AccountDatabase:
             
             return accounts
     
+    def get_accounts_by_session(self, session_id: str) -> List[Account]:
+        """获取会话已绑定的账号"""
+        try:
+            with self._get_cursor() as cursor:
+                cursor.execute('''
+                    SELECT * FROM accounts 
+                    WHERE session_id = ? AND status = 'in_use'
+                ''', (session_id,))
+                
+                rows = cursor.fetchall()
+                accounts = []
+                for row in rows:
+                    account = Account(
+                        id=row['id'],
+                        email=row['email'],
+                        local_id=row['local_id'],
+                        id_token=row['id_token'],
+                        refresh_token=row['refresh_token'],
+                        status=row['status'],
+                        created_at=datetime.fromisoformat(row['created_at']) if row['created_at'] else None,
+                        last_used=datetime.fromisoformat(row['last_used']) if row['last_used'] else None,
+                        last_refresh_time=datetime.fromisoformat(row['last_refresh_time']) if row['last_refresh_time'] else None,
+                        use_count=row['use_count'] or 0,
+                        session_id=row['session_id']
+                    )
+                    accounts.append(account)
+                
+                if accounts:
+                    # 更新最后使用时间
+                    cursor.execute('''
+                        UPDATE accounts 
+                        SET last_used = ? 
+                        WHERE session_id = ?
+                    ''', (datetime.now(), session_id))
+                    cursor.connection.commit()
+                
+                return accounts
+                
+        except Exception as e:
+            logger.error(f"获取会话账号失败: {e}")
+            return []
+    
     def allocate_accounts_for_session(self, session_id: str, count: int = None) -> List[Account]:
         """为会话分配指定数量的账号"""
         if count is None:

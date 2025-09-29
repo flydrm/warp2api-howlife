@@ -28,9 +28,11 @@ class SessionContext:
     created_at: datetime
     last_used: datetime
     
-    def is_expired(self, timeout_minutes: int = 30) -> bool:
+    def is_expired(self, timeout_seconds: int = None) -> bool:
         """检查会话是否超时"""
-        return datetime.now() - self.last_used > timedelta(minutes=timeout_minutes)
+        if timeout_seconds is None:
+            timeout_seconds = config.SESSION_TIMEOUT
+        return datetime.now() - self.last_used > timedelta(seconds=timeout_seconds)
 
 
 class PoolManager:
@@ -110,10 +112,41 @@ class PoolManager:
         
         logger.info(f"为请求分配账号: {session_id}")
         
+        # 检查是否已有绑定的账号（基于 IP 的 session 复用）
+        with self._lock:
+            if session_id in self._sessions:
+                # 会话已存在，返回已分配的账号
+                session_context = self._sessions[session_id]
+                # 更新会话活跃时间
+                session_context.last_used = datetime.now()
+                logger.info(f"复用已有会话的账号: {session_id}, 账号数: {len(session_context.accounts)}")
+                return session_context.accounts
+        
+        # 检查数据库中是否有该 session 的账号（可能是服务重启后的恢复）
+        existing_accounts = self.db.get_accounts_by_session(session_id)
+        if existing_accounts:
+            logger.info(f"从数据库恢复会话账号: {session_id}, 账号数: {len(existing_accounts)}")
+            
+            # 检查并刷新过期的token
+            refreshed_accounts = await self._check_and_refresh_tokens(existing_accounts)
+            if refreshed_accounts:
+                existing_accounts = refreshed_accounts
+            
+            # 创建会话上下文
+            session_context = SessionContext(
+                session_id=session_id,
+                accounts=existing_accounts,
+                created_at=datetime.now(),
+                last_used=datetime.now()
+            )
+            with self._lock:
+                self._sessions[session_id] = session_context
+            return existing_accounts
+        
         # 确保有足够的可用账号
         await self._ensure_minimum_accounts()
         
-        # 从数据库分配账号
+        # 从数据库分配新账号
         accounts = self.db.allocate_accounts_for_session(session_id, config.ACCOUNTS_PER_REQUEST)
         
         if not accounts:
