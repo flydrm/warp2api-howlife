@@ -10,6 +10,7 @@
 - ✅ **自动补充**：账号不足时自动补充到配置的最小值
 - ✅ **Token刷新**：自动刷新即将过期的Token（遵守1小时限制）
 - ✅ **会话管理**：支持会话级别的账号分配和释放
+- ✅ **429错误处理**：自动删除触发429的账号，快速恢复服务
 
 ## 安装
 
@@ -31,6 +32,10 @@ POOL_SERVICE_PORT = 8019       # 监听端口
 MIN_POOL_SIZE = 5      # 最少维持账号数
 MAX_POOL_SIZE = 50     # 最大储备账号数
 ACCOUNTS_PER_REQUEST = 1  # 每个请求分配账号数
+
+# 429错误处理配置
+MAX_429_RETRY_LIMIT = 3  # 最大重试次数
+ENABLE_429_AUTO_SWITCH = True  # 启用自动切换
 ```
 
 ## 启动服务
@@ -84,7 +89,9 @@ POST /api/accounts/release
 Content-Type: application/json
 
 {
-    "session_id": "session_abc123"
+    "session_id": "session_abc123",
+    "delete_account": false,  // 可选，429错误时设为true
+    "reason": "normal"        // 可选，删除原因
 }
 ```
 
@@ -104,7 +111,13 @@ GET /api/accounts/status
     "active_sessions": 2,
     "running": true,
     "health": "healthy",
-    "timestamp": "2024-01-01T12:00:00"
+    "timestamp": "2024-01-01T12:00:00",
+    "429_stats": {
+        "total_429_errors": 15,
+        "deleted_accounts": 15,
+        "hourly_deletes": 5,
+        "last_429_time": "2024-01-01T11:45:00"
+    }
 }
 ```
 

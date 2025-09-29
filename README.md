@@ -12,6 +12,7 @@
 - **并发安全**: 支持多进程并发调用，线程安全
 - **智能降级**: 账号池不可用时自动降级到临时账号
 - **RESTful API**: 标准的HTTP接口，易于集成
+- **⚡ 429错误自动处理**: 遇到速率限制时自动切换账号，无需等待（v1.1.0新增）
 
 ## 📁 项目结构
 
@@ -218,6 +219,10 @@ export USE_POOL_SERVICE="true"
 export MIN_POOL_SIZE="5"    # 最少账号数
 export MAX_POOL_SIZE="50"   # 最大账号数
 
+# 429错误处理配置（新增）
+export MAX_429_RETRY_LIMIT="3"      # 最大重试次数
+export ENABLE_429_AUTO_SWITCH="true" # 启用自动切换
+
 # Warp认证配置
 export WARP_JWT="your-jwt-token"
 export WARP_REFRESH_TOKEN="your-refresh-token"
@@ -253,6 +258,15 @@ export LOG_LEVEL="INFO"
   curl -X POST http://localhost:8019/api/accounts/replenish \
     -d '{"count": 10}'
   ```
+
+### 429错误处理（新增）
+- 系统会自动删除触发429的账号并切换新账号
+- 查看429统计信息：
+  ```bash
+  curl http://localhost:8019/api/accounts/status | jq '.["429_stats"]'
+  ```
+- 如果删除率过高，系统会自动告警
+- 可通过 `MAX_429_RETRY_LIMIT` 调整重试次数
 ### SQLlite命令样式
 
 * 添加账号的命令:
